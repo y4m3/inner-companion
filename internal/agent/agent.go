@@ -31,13 +31,27 @@ func NewAnthropicRunner(client anthropic.LLMClient, registry *tool.Registry, sys
 func (a *AnthropicRunner) Run(ctx context.Context, req protocol.AgentRequest) (protocol.AgentResponse, error) {
 	toolDefs := a.buildToolDefs()
 
-	messages := []anthropic.Message{
-		{
-			Role: "user",
-			Content: []anthropic.ContentBlock{
-				{Type: "text", Text: req.InputText},
-			},
+	// Convert history to anthropic messages and prepend
+	var messages []anthropic.Message
+	for _, hm := range req.History {
+		messages = append(messages, toAnthropicMessage(hm))
+	}
+
+	// Track the index where new messages start
+	newMsgStart := len(messages)
+
+	// Add current user message
+	messages = append(messages, anthropic.Message{
+		Role: "user",
+		Content: []anthropic.ContentBlock{
+			{Type: "text", Text: req.InputText},
 		},
+	})
+
+	// Determine system prompt
+	system := a.system
+	if req.SystemPrompt != "" {
+		system = req.SystemPrompt
 	}
 
 	var allToolCalls []protocol.AgentToolCall
@@ -48,7 +62,7 @@ func (a *AnthropicRunner) Run(ctx context.Context, req protocol.AgentRequest) (p
 		}
 
 		resp, err := a.client.CreateMessage(ctx, anthropic.MessagesRequest{
-			System:   a.system,
+			System:   system,
 			Messages: messages,
 			Tools:    toolDefs,
 		})
@@ -61,11 +75,19 @@ func (a *AnthropicRunner) Run(ctx context.Context, req protocol.AgentRequest) (p
 			if text == "" {
 				text = "(no response)"
 			}
+
+			// Add final assistant message for history
+			messages = append(messages, anthropic.Message{
+				Role:    "assistant",
+				Content: resp.Content,
+			})
+
 			return protocol.AgentResponse{
 				RequestID:     req.RequestID,
 				Status:        "ok",
 				AssistantText: text,
 				ToolCalls:     allToolCalls,
+				NewMessages:   toHistoryMessages(messages[newMsgStart:]),
 			}, nil
 		}
 
@@ -109,6 +131,44 @@ func (a *AnthropicRunner) Run(ctx context.Context, req protocol.AgentRequest) (p
 	}
 
 	return protocol.AgentResponse{}, fmt.Errorf("exceeded maximum iterations (%d)", maxIterations)
+}
+
+func toAnthropicMessage(hm protocol.HistoryMessage) anthropic.Message {
+	blocks := make([]anthropic.ContentBlock, len(hm.Content))
+	for i, b := range hm.Content {
+		blocks[i] = anthropic.ContentBlock{
+			Type:      b.Type,
+			Text:      b.Text,
+			ID:        b.ID,
+			Name:      b.Name,
+			Input:     b.Input,
+			ToolUseID: b.ToolUseID,
+			Content:   b.Content,
+			IsError:   b.IsError,
+		}
+	}
+	return anthropic.Message{Role: hm.Role, Content: blocks}
+}
+
+func toHistoryMessages(msgs []anthropic.Message) []protocol.HistoryMessage {
+	result := make([]protocol.HistoryMessage, len(msgs))
+	for i, m := range msgs {
+		blocks := make([]protocol.HistoryContentBlock, len(m.Content))
+		for j, b := range m.Content {
+			blocks[j] = protocol.HistoryContentBlock{
+				Type:      b.Type,
+				Text:      b.Text,
+				ID:        b.ID,
+				Name:      b.Name,
+				Input:     b.Input,
+				ToolUseID: b.ToolUseID,
+				Content:   b.Content,
+				IsError:   b.IsError,
+			}
+		}
+		result[i] = protocol.HistoryMessage{Role: m.Role, Content: blocks}
+	}
+	return result
 }
 
 func (a *AnthropicRunner) executeTool(ctx context.Context, name string, input map[string]any, allowed []string) tool.Result {

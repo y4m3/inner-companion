@@ -9,6 +9,7 @@ import (
 	"inner-companion/internal/anthropic"
 	"inner-companion/internal/gateway"
 	"inner-companion/internal/sandbox"
+	"inner-companion/internal/session"
 	"inner-companion/internal/tool"
 )
 
@@ -41,6 +42,11 @@ func main() {
 		port = "8080"
 	}
 
+	sessionDB := os.Getenv("SESSION_DB")
+	if sessionDB == "" {
+		sessionDB = "sessions.db"
+	}
+
 	// Build Anthropic client with retry
 	llmClient := anthropic.NewRetryClient(
 		anthropic.NewClient(anthropic.ClientConfig{
@@ -55,8 +61,20 @@ func main() {
 		tool.NewBashTool(workspaceDir),
 	)
 
-	// Build agent runner
-	runner := agent.NewAnthropicRunner(llmClient, registry, systemPrompt)
+	// Build session store
+	store, err := session.NewSQLiteStore(sessionDB)
+	if err != nil {
+		log.Fatalf("session store: %v", err)
+	}
+	defer store.Close()
+
+	// Build memory manager with LLM summarizer
+	summarizer := session.NewLLMSummarizer(llmClient)
+	memoryManager := session.NewMemoryManager(store, summarizer, 100000)
+
+	// Build agent runner with session persistence
+	baseRunner := agent.NewAnthropicRunner(llmClient, registry, systemPrompt)
+	runner := gateway.NewSessionRunner(baseRunner, store, memoryManager)
 
 	svc := gateway.NewService(runner)
 	h := gateway.NewHTTPHandler(svc)

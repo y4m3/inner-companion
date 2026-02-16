@@ -47,6 +47,24 @@ type OutboundErrorMessage struct {
 	Message   string `json:"message"`
 }
 
+// HistoryContentBlock represents a single content block within a history message.
+type HistoryContentBlock struct {
+	Type      string         `json:"type"`
+	Text      string         `json:"text,omitempty"`
+	ID        string         `json:"id,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	Input     map[string]any `json:"input,omitempty"`
+	ToolUseID string         `json:"tool_use_id,omitempty"`
+	Content   string         `json:"content,omitempty"`
+	IsError   bool           `json:"is_error,omitempty"`
+}
+
+// HistoryMessage represents a stored conversation message.
+type HistoryMessage struct {
+	Role    string                `json:"role"`
+	Content []HistoryContentBlock `json:"content"`
+}
+
 // AgentRequest is a Gateway -> Agent request.
 type AgentRequest struct {
 	RequestID    string   `json:"request_id"`
@@ -55,6 +73,9 @@ type AgentRequest struct {
 	InputText    string   `json:"input_text"`
 	AllowedTools []string `json:"allowed_tools"`
 	TimeoutSec   int      `json:"timeout_sec"`
+
+	History      []HistoryMessage `json:"-"`
+	SystemPrompt string           `json:"-"`
 }
 
 // AgentToolCall is a tool call in AgentResponse.
@@ -71,6 +92,8 @@ type AgentResponse struct {
 	Status        string          `json:"status"`
 	AssistantText string          `json:"assistant_text"`
 	ToolCalls     []AgentToolCall `json:"tool_calls"`
+
+	NewMessages []HistoryMessage `json:"-"`
 }
 
 func ValidateOutboundAssistantMessage(msg OutboundAssistantMessage) error {

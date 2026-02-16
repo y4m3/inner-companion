@@ -286,3 +286,148 @@ func TestAnthropicRunner_APIError(t *testing.T) {
 		t.Fatalf("expected 'anthropic api' in error, got: %v", err)
 	}
 }
+
+func TestAnthropicRunner_HistoryPrepended(t *testing.T) {
+	client := &fakeLLMClient{
+		responses: []anthropic.MessagesResponse{
+			{
+				StopReason: "end_turn",
+				Content:    []anthropic.ContentBlock{{Type: "text", Text: "continued"}},
+			},
+		},
+	}
+	registry := tool.NewRegistry()
+	runner := NewAnthropicRunner(client, registry, "system prompt")
+
+	req := makeReq()
+	req.History = []protocol.HistoryMessage{
+		{Role: "user", Content: []protocol.HistoryContentBlock{{Type: "text", Text: "previous question"}}},
+		{Role: "assistant", Content: []protocol.HistoryContentBlock{{Type: "text", Text: "previous answer"}}},
+	}
+
+	res, err := runner.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.AssistantText != "continued" {
+		t.Fatalf("expected 'continued', got %q", res.AssistantText)
+	}
+
+	// Verify history was prepended: history (2) + current user message (1) = 3
+	if len(client.calls) != 1 {
+		t.Fatalf("expected 1 API call, got %d", len(client.calls))
+	}
+	msgs := client.calls[0].Messages
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	if msgs[0].Role != "user" || msgs[0].Content[0].Text != "previous question" {
+		t.Fatalf("expected history user msg first, got %+v", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || msgs[1].Content[0].Text != "previous answer" {
+		t.Fatalf("expected history assistant msg second, got %+v", msgs[1])
+	}
+	if msgs[2].Role != "user" || msgs[2].Content[0].Text != "hello" {
+		t.Fatalf("expected current user msg third, got %+v", msgs[2])
+	}
+}
+
+func TestAnthropicRunner_SystemPromptOverride(t *testing.T) {
+	client := &fakeLLMClient{
+		responses: []anthropic.MessagesResponse{
+			{
+				StopReason: "end_turn",
+				Content:    []anthropic.ContentBlock{{Type: "text", Text: "ok"}},
+			},
+		},
+	}
+	registry := tool.NewRegistry()
+	runner := NewAnthropicRunner(client, registry, "default system")
+
+	req := makeReq()
+	req.SystemPrompt = "overridden system"
+
+	runner.Run(context.Background(), req)
+
+	if client.calls[0].System != "overridden system" {
+		t.Fatalf("expected overridden system prompt, got %q", client.calls[0].System)
+	}
+}
+
+func TestAnthropicRunner_NewMessages(t *testing.T) {
+	client := &fakeLLMClient{
+		responses: []anthropic.MessagesResponse{
+			{
+				StopReason: "end_turn",
+				Content:    []anthropic.ContentBlock{{Type: "text", Text: "reply"}},
+			},
+		},
+	}
+	registry := tool.NewRegistry()
+	runner := NewAnthropicRunner(client, registry, "")
+
+	res, err := runner.Run(context.Background(), makeReq())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// NewMessages should contain the user message and assistant response
+	if len(res.NewMessages) != 2 {
+		t.Fatalf("expected 2 new messages, got %d", len(res.NewMessages))
+	}
+	if res.NewMessages[0].Role != "user" {
+		t.Fatalf("expected user role, got %s", res.NewMessages[0].Role)
+	}
+	if res.NewMessages[0].Content[0].Text != "hello" {
+		t.Fatalf("expected 'hello', got %q", res.NewMessages[0].Content[0].Text)
+	}
+	if res.NewMessages[1].Role != "assistant" {
+		t.Fatalf("expected assistant role, got %s", res.NewMessages[1].Role)
+	}
+	if res.NewMessages[1].Content[0].Text != "reply" {
+		t.Fatalf("expected 'reply', got %q", res.NewMessages[1].Content[0].Text)
+	}
+}
+
+func TestAnthropicRunner_NewMessagesWithToolUse(t *testing.T) {
+	client := &fakeLLMClient{
+		responses: []anthropic.MessagesResponse{
+			{
+				StopReason: "tool_use",
+				Content: []anthropic.ContentBlock{
+					{Type: "text", Text: "reading"},
+					{Type: "tool_use", ID: "tu1", Name: "read", Input: map[string]any{"path": "/x"}},
+				},
+			},
+			{
+				StopReason: "end_turn",
+				Content:    []anthropic.ContentBlock{{Type: "text", Text: "done"}},
+			},
+		},
+	}
+	readExec := &fakeExecutor{name: "read", results: []tool.Result{{Output: "data"}}}
+	registry := tool.NewRegistry(readExec)
+	runner := NewAnthropicRunner(client, registry, "")
+
+	res, err := runner.Run(context.Background(), makeReq())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// NewMessages: user + assistant(tool_use) + user(tool_result) + assistant(final)
+	if len(res.NewMessages) != 4 {
+		t.Fatalf("expected 4 new messages, got %d", len(res.NewMessages))
+	}
+	if res.NewMessages[0].Role != "user" {
+		t.Fatalf("msg 0: expected user, got %s", res.NewMessages[0].Role)
+	}
+	if res.NewMessages[1].Role != "assistant" {
+		t.Fatalf("msg 1: expected assistant, got %s", res.NewMessages[1].Role)
+	}
+	if res.NewMessages[2].Role != "user" {
+		t.Fatalf("msg 2: expected user (tool_result), got %s", res.NewMessages[2].Role)
+	}
+	if res.NewMessages[3].Role != "assistant" {
+		t.Fatalf("msg 3: expected assistant, got %s", res.NewMessages[3].Role)
+	}
+}
