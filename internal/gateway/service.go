@@ -39,23 +39,27 @@ type Service struct {
 	idempotencyTTL        time.Duration
 	nowFn                 func() time.Time
 	inflight              map[string]*inflightCall
+	purgeInterval         time.Duration
 	runBaseCtx            context.Context
 	runBaseCancel         context.CancelFunc
 }
 
 func NewService(runner AgentRunner) *Service {
 	baseCtx, baseCancel := context.WithCancel(context.Background())
-	return &Service{
+	svc := &Service{
 		runner:                runner,
 		idempRes:              map[string]result{},
 		idempOrder:            []string{},
 		maxIdempotencyEntries: 1024,
 		idempotencyTTL:        5 * time.Minute,
+		purgeInterval:         1 * time.Minute,
 		nowFn:                 time.Now,
 		inflight:              map[string]*inflightCall{},
 		runBaseCtx:            baseCtx,
 		runBaseCancel:         baseCancel,
 	}
+	go svc.runPurger()
+	return svc
 }
 
 // Shutdown cancels in-flight agent runs and makes this Service unusable for new requests.
@@ -181,6 +185,36 @@ func (s *Service) isExpired(res result, now time.Time) bool {
 		return false
 	}
 	return now.Sub(res.createdAt) > s.idempotencyTTL
+}
+
+func (s *Service) runPurger() {
+	ticker := time.NewTicker(s.purgeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.purgeExpired()
+		case <-s.runBaseCtx.Done():
+			return
+		}
+	}
+}
+
+func (s *Service) purgeExpired() {
+	now := s.nowFn()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	n := 0
+	for _, id := range s.idempOrder {
+		if cached, ok := s.idempRes[id]; ok && !s.isExpired(cached, now) {
+			s.idempOrder[n] = id
+			n++
+		} else {
+			delete(s.idempRes, id)
+		}
+	}
+	s.idempOrder = s.idempOrder[:n:n]
 }
 
 func (s *Service) removeFromOrder(reqID string) {

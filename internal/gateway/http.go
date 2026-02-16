@@ -32,12 +32,14 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "unknown", "unknown", http.StatusMethodNotAllowed, "method_not_allowed", "method must be POST")
 		return
 	}
-	if ct := strings.TrimSpace(r.Header.Get("Content-Type")); ct != "" {
-		mediaType, _, err := mime.ParseMediaType(ct)
-		if err != nil || mediaType != "application/json" {
-			writeError(w, "unknown", "unknown", http.StatusUnsupportedMediaType, "unsupported_media_type", "content-type must be application/json")
-			return
-		}
+	ct := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if ct == "" {
+		writeError(w, "unknown", "unknown", http.StatusUnsupportedMediaType, "unsupported_media_type", "content-type must be application/json")
+		return
+	}
+	if mediaType, _, err := mime.ParseMediaType(ct); err != nil || mediaType != "application/json" {
+		writeError(w, "unknown", "unknown", http.StatusUnsupportedMediaType, "unsupported_media_type", "content-type must be application/json")
+		return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)

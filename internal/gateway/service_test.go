@@ -70,6 +70,7 @@ func TestServiceHandleUserMessage(t *testing.T) {
 
 	runner := &fakeAgentRunner{resp: protocol.AgentResponse{Status: "ok", AssistantText: "done"}}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 
 	res, err := svc.HandleUserMessage(context.Background(), protocol.InboundUserMessage{
 		Type:        "user_message",
@@ -94,6 +95,7 @@ func TestServiceHandleUserMessage_IdempotentByClientMsgID(t *testing.T) {
 
 	runner := &fakeAgentRunner{resp: protocol.AgentResponse{Status: "ok", AssistantText: "done"}}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 
 	msg := protocol.InboundUserMessage{
 		Type:        "user_message",
@@ -124,6 +126,7 @@ func TestServiceHandleUserMessage_IdempotentConcurrent(t *testing.T) {
 
 	runner := &fakeAgentRunner{resp: protocol.AgentResponse{Status: "ok", AssistantText: "done"}, delay: 20 * time.Millisecond}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 
 	msg := protocol.InboundUserMessage{
 		Type:        "user_message",
@@ -176,6 +179,7 @@ func TestServiceHandleUserMessage_ErrorIsNotCached(t *testing.T) {
 		},
 	}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 	msg := protocol.InboundUserMessage{
 		Type:        "user_message",
 		SessionID:   "s-1",
@@ -222,6 +226,7 @@ func TestServiceHandleUserMessage_AgentStatusErrorIsNotCached(t *testing.T) {
 		},
 	}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 	msg := protocol.InboundUserMessage{
 		Type:        "user_message",
 		SessionID:   "s-1",
@@ -255,6 +260,7 @@ func TestServiceHandleUserMessage_IdempotencyCacheEviction(t *testing.T) {
 
 	runner := &fakeAgentRunner{resp: protocol.AgentResponse{Status: "ok", AssistantText: "done"}}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 	svc.maxIdempotencyEntries = 1
 
 	msg1 := protocol.InboundUserMessage{Type: "user_message", SessionID: "s-1", AgentID: "a-1", Text: "hello", ClientMsgID: "c-1"}
@@ -281,6 +287,7 @@ func TestServiceHandleUserMessage_IdempotencyCacheExpiresByTTL(t *testing.T) {
 	now := time.Unix(1000, 0)
 	runner := &fakeAgentRunner{resp: protocol.AgentResponse{Status: "ok", AssistantText: "done"}}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 	svc.idempotencyTTL = 30 * time.Second
 	svc.nowFn = func() time.Time { return now }
 
@@ -330,6 +337,7 @@ func TestServiceHandleUserMessage_IdempotencyTTLStartsAtResponseTime(t *testing.
 		},
 	}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 	svc.idempotencyTTL = 30 * time.Second
 	svc.nowFn = func() time.Time {
 		nowMu.Lock()
@@ -364,6 +372,7 @@ func TestServiceHandleUserMessage_InflightWaitHonorsContextCancel(t *testing.T) 
 		release: make(chan struct{}),
 	}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 	msg := protocol.InboundUserMessage{Type: "user_message", SessionID: "s-1", AgentID: "a-1", Text: "hello", ClientMsgID: "c-1"}
 
 	ownerDone := make(chan struct{})
@@ -398,6 +407,7 @@ func TestServiceHandleUserMessage_RejectInvalidInbound(t *testing.T) {
 	t.Parallel()
 
 	svc := NewService(&fakeAgentRunner{})
+	t.Cleanup(svc.Shutdown)
 	_, err := svc.HandleUserMessage(context.Background(), protocol.InboundUserMessage{Type: "assistant_message"})
 	if err == nil {
 		t.Fatalf("expected error")
@@ -425,6 +435,7 @@ func TestServiceHandleUserMessage_RunnerPanicDoesNotLeakInflight(t *testing.T) {
 		},
 	}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 	msg := protocol.InboundUserMessage{
 		Type:        "user_message",
 		SessionID:   "s-1",
@@ -461,6 +472,7 @@ func TestServiceHandleUserMessage_InflightOwnerCancelDoesNotFailWaiters(t *testi
 		release: make(chan struct{}),
 	}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 	msg := protocol.InboundUserMessage{
 		Type:        "user_message",
 		SessionID:   "s-1",
@@ -506,6 +518,7 @@ func TestServiceHandleUserMessage_ShutdownCancelsInflightRun(t *testing.T) {
 		release: make(chan struct{}),
 	}
 	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
 	msg := protocol.InboundUserMessage{
 		Type:        "user_message",
 		SessionID:   "s-1",
@@ -529,6 +542,54 @@ func TestServiceHandleUserMessage_ShutdownCancelsInflightRun(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "context canceled") {
 		t.Fatalf("expected context canceled error, got %q", err.Error())
+	}
+}
+
+func TestServicePurgeExpired(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1000, 0)
+	runner := &fakeAgentRunner{resp: protocol.AgentResponse{Status: "ok", AssistantText: "done"}}
+	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
+	svc.idempotencyTTL = 30 * time.Second
+	svc.nowFn = func() time.Time { return now }
+
+	msg1 := protocol.InboundUserMessage{Type: "user_message", SessionID: "s-1", AgentID: "a-1", Text: "hello", ClientMsgID: "c-1"}
+	msg2 := protocol.InboundUserMessage{Type: "user_message", SessionID: "s-1", AgentID: "a-1", Text: "hello", ClientMsgID: "c-2"}
+
+	// Store msg1 at t=1000
+	if _, err := svc.HandleUserMessage(context.Background(), msg1); err != nil {
+		t.Fatalf("msg1 error: %v", err)
+	}
+
+	// Store msg2 at t=1020
+	now = time.Unix(1020, 0)
+	if _, err := svc.HandleUserMessage(context.Background(), msg2); err != nil {
+		t.Fatalf("msg2 error: %v", err)
+	}
+	if runner.callCount() != 2 {
+		t.Fatalf("expected 2 calls, got %d", runner.callCount())
+	}
+
+	// Advance to t=1035: msg1 expired (35s > 30s), msg2 not (15s < 30s)
+	now = time.Unix(1035, 0)
+	svc.purgeExpired()
+
+	// msg1 should be purged → new runner call
+	if _, err := svc.HandleUserMessage(context.Background(), msg1); err != nil {
+		t.Fatalf("msg1 retry error: %v", err)
+	}
+	if runner.callCount() != 3 {
+		t.Fatalf("expected msg1 rerun after purge, got %d calls", runner.callCount())
+	}
+
+	// msg2 should still be cached → no new call
+	if _, err := svc.HandleUserMessage(context.Background(), msg2); err != nil {
+		t.Fatalf("msg2 retry error: %v", err)
+	}
+	if runner.callCount() != 3 {
+		t.Fatalf("expected msg2 cache hit after purge, got %d calls", runner.callCount())
 	}
 }
 

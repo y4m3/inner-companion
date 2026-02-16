@@ -22,9 +22,12 @@ func TestHTTPHandler_PostMessages_Success(t *testing.T) {
 	t.Parallel()
 
 	runner := &fakeAgentRunner{resp: protocol.AgentResponse{Status: "ok", AssistantText: "done"}}
-	h := NewHTTPHandler(NewService(runner))
+	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
+	h := NewHTTPHandler(svc)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"type":"user_message","session_id":"s-1","agent_id":"a-1","text":"hello","client_msg_id":"c-1"}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -41,9 +44,12 @@ func TestHTTPHandler_PostMessages_AgentStatusError(t *testing.T) {
 	t.Parallel()
 
 	runner := &fakeAgentRunner{resp: protocol.AgentResponse{Status: "error", AssistantText: "model failed"}}
-	h := NewHTTPHandler(NewService(runner))
+	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
+	h := NewHTTPHandler(svc)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"type":"user_message","session_id":"s-1","agent_id":"a-1","text":"hello","client_msg_id":"c-1"}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -59,8 +65,11 @@ func TestHTTPHandler_PostMessages_AgentStatusError(t *testing.T) {
 func TestHTTPHandler_PostMessages_InvalidPayload(t *testing.T) {
 	t.Parallel()
 
-	h := NewHTTPHandler(NewService(&fakeAgentRunner{}))
+	svc := NewService(&fakeAgentRunner{})
+	t.Cleanup(svc.Shutdown)
+	h := NewHTTPHandler(svc)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"type":"assistant_message"}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -87,26 +96,47 @@ func TestHTTPHandler_PostMessages_InvalidPayload(t *testing.T) {
 func TestHTTPHandler_PostMessages_UnsupportedMediaType(t *testing.T) {
 	t.Parallel()
 
-	h := NewHTTPHandler(NewService(&fakeAgentRunner{}))
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"type":"user_message"}`))
-	req.Header.Set("Content-Type", "text/plain")
-	rec := httptest.NewRecorder()
+	svc := NewService(&fakeAgentRunner{})
+	t.Cleanup(svc.Shutdown)
+	h := NewHTTPHandler(svc)
 
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("expected 415, got %d", rec.Code)
+	cases := []struct {
+		name        string
+		contentType string
+	}{
+		{"wrong type", "text/plain"},
+		{"missing", ""},
 	}
-	if !strings.Contains(rec.Body.String(), `"type":"error"`) {
-		t.Fatalf("expected error payload, got %s", rec.Body.String())
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"type":"user_message"}`))
+			if tc.contentType != "" {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			rec := httptest.NewRecorder()
+
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("expected 415, got %d", rec.Code)
+			}
+			if !strings.Contains(rec.Body.String(), `"type":"error"`) {
+				t.Fatalf("expected error payload, got %s", rec.Body.String())
+			}
+		})
 	}
 }
 
 func TestHTTPHandler_PostMessages_ReadBodyFailureIsServerError(t *testing.T) {
 	t.Parallel()
 
-	h := NewHTTPHandler(NewService(&fakeAgentRunner{}))
+	svc := NewService(&fakeAgentRunner{})
+	t.Cleanup(svc.Shutdown)
+	h := NewHTTPHandler(svc)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", io.NopCloser(bytes.NewBuffer(nil)))
+	req.Header.Set("Content-Type", "application/json")
 	req.Body = errReadCloser{}
 	rec := httptest.NewRecorder()
 
@@ -121,8 +151,11 @@ func TestHTTPHandler_PostMessages_InternalErrorDoesNotLeakDetails(t *testing.T) 
 	t.Parallel()
 
 	runner := &fakeAgentRunner{err: errors.New("db timeout: secret-token-123")}
-	h := NewHTTPHandler(NewService(runner))
+	svc := NewService(runner)
+	t.Cleanup(svc.Shutdown)
+	h := NewHTTPHandler(svc)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"type":"user_message","session_id":"s-1","agent_id":"a-1","text":"hello","client_msg_id":"c-1"}`))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -138,10 +171,13 @@ func TestHTTPHandler_PostMessages_InternalErrorDoesNotLeakDetails(t *testing.T) 
 func TestHTTPHandler_PostMessages_TooLargePayload(t *testing.T) {
 	t.Parallel()
 
-	h := NewHTTPHandler(NewService(&fakeAgentRunner{}))
+	svc := NewService(&fakeAgentRunner{})
+	t.Cleanup(svc.Shutdown)
+	h := NewHTTPHandler(svc)
 	large := strings.Repeat("a", maxRequestBodyBytes+1)
 	payload := `{"type":"user_message","session_id":"s-1","agent_id":"a-1","text":"` + large + `","client_msg_id":"c-1"}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(payload))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
 	h.ServeHTTP(rec, req)
@@ -154,7 +190,9 @@ func TestHTTPHandler_PostMessages_TooLargePayload(t *testing.T) {
 func TestHTTPHandler_MethodNotAllowed(t *testing.T) {
 	t.Parallel()
 
-	h := NewHTTPHandler(NewService(&fakeAgentRunner{}))
+	svc := NewService(&fakeAgentRunner{})
+	t.Cleanup(svc.Shutdown)
+	h := NewHTTPHandler(svc)
 	req := httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
 	rec := httptest.NewRecorder()
 
