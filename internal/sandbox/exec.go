@@ -64,7 +64,17 @@ func RunInSandbox(ctx context.Context, cfg Config, command string) (string, erro
 		return "", fmt.Errorf("sandbox: executable path: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, self, sandboxArg, cfg.WorkspaceDir, command)
+	var cmd *exec.Cmd
+	if cgroupEnabled {
+		cmd = exec.CommandContext(ctx, "systemd-run",
+			"--user", "--scope",
+			"--property=CPUQuota=100%",
+			"--property=MemoryMax=512M",
+			"--",
+			self, sandboxArg, cfg.WorkspaceDir, command)
+	} else {
+		cmd = exec.CommandContext(ctx, self, sandboxArg, cfg.WorkspaceDir, command)
+	}
 	cmd.Dir = cfg.WorkspaceDir
 
 	var stdout, stderr bytes.Buffer

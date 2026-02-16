@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"inner-companion/internal/anthropic"
 	"inner-companion/internal/protocol"
@@ -429,5 +430,34 @@ func TestAnthropicRunner_NewMessagesWithToolUse(t *testing.T) {
 	}
 	if res.NewMessages[3].Role != "assistant" {
 		t.Fatalf("msg 3: expected assistant, got %s", res.NewMessages[3].Role)
+	}
+}
+
+// slowLLMClient simulates a slow LLM that blocks until context is cancelled.
+type slowLLMClient struct{}
+
+func (s *slowLLMClient) CreateMessage(ctx context.Context, _ anthropic.MessagesRequest) (anthropic.MessagesResponse, error) {
+	<-ctx.Done()
+	return anthropic.MessagesResponse{}, ctx.Err()
+}
+
+func TestAnthropicRunner_RequestTimeout(t *testing.T) {
+	client := &slowLLMClient{}
+	registry := tool.NewRegistry()
+	runner := NewAnthropicRunner(client, registry, "system prompt")
+	runner.requestTimeout = 10 * time.Millisecond
+
+	start := time.Now()
+	_, err := runner.Run(context.Background(), makeReq())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error due to request timeout")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got: %v", err)
+	}
+	if elapsed > 1*time.Second {
+		t.Fatalf("expected fast timeout, but took %v", elapsed)
 	}
 }

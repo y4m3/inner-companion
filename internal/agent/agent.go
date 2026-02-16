@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"inner-companion/internal/anthropic"
 	"inner-companion/internal/protocol"
@@ -14,21 +15,27 @@ const maxIterations = 20
 
 // AnthropicRunner implements gateway.AgentRunner using the Anthropic Messages API.
 type AnthropicRunner struct {
-	client   anthropic.LLMClient
-	registry *tool.Registry
-	system   string
+	client         anthropic.LLMClient
+	registry       *tool.Registry
+	system         string
+	requestTimeout time.Duration
 }
 
 // NewAnthropicRunner creates a new AnthropicRunner.
 func NewAnthropicRunner(client anthropic.LLMClient, registry *tool.Registry, system string) *AnthropicRunner {
 	return &AnthropicRunner{
-		client:   client,
-		registry: registry,
-		system:   system,
+		client:         client,
+		registry:       registry,
+		system:         system,
+		requestTimeout: 300 * time.Second,
 	}
 }
 
 func (a *AnthropicRunner) Run(ctx context.Context, req protocol.AgentRequest) (protocol.AgentResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, a.requestTimeout)
+	defer cancel()
+
+	ctx = protocol.WithSessionID(ctx, req.SessionID)
 	toolDefs := a.buildToolDefs()
 
 	// Convert history to anthropic messages and prepend

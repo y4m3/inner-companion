@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"inner-companion/internal/audit"
 	"inner-companion/internal/protocol"
 	"inner-companion/internal/session"
 )
@@ -138,7 +139,7 @@ func TestSessionRunner_Run_BasicFlow(t *testing.T) {
 	}
 	summarizer := &fakeSummarizer{result: "summary"}
 	mm := session.NewMemoryManager(store, summarizer, 200000)
-	sr := NewSessionRunner(inner, store, mm)
+	sr := NewSessionRunner(inner, store, mm, nil)
 
 	req := protocol.AgentRequest{
 		RequestID:    "r1",
@@ -196,7 +197,7 @@ func TestSessionRunner_Run_HistoryLoaded(t *testing.T) {
 	}
 	summarizer := &fakeSummarizer{result: "summary"}
 	mm := session.NewMemoryManager(store, summarizer, 200000)
-	sr := NewSessionRunner(inner, store, mm)
+	sr := NewSessionRunner(inner, store, mm, nil)
 
 	req := protocol.AgentRequest{
 		RequestID:    "r1",
@@ -236,7 +237,7 @@ func TestSessionRunner_Run_SystemPromptWithMemory(t *testing.T) {
 	}
 	summarizer := &fakeSummarizer{result: "summary"}
 	mm := session.NewMemoryManager(store, summarizer, 200000)
-	sr := NewSessionRunner(inner, store, mm)
+	sr := NewSessionRunner(inner, store, mm, nil)
 
 	req := protocol.AgentRequest{
 		RequestID:    "r1",
@@ -262,7 +263,7 @@ func TestSessionRunner_Run_InnerError(t *testing.T) {
 	inner := &fakeInnerRunner{err: errors.New("boom")}
 	summarizer := &fakeSummarizer{}
 	mm := session.NewMemoryManager(store, summarizer, 200000)
-	sr := NewSessionRunner(inner, store, mm)
+	sr := NewSessionRunner(inner, store, mm, nil)
 
 	req := protocol.AgentRequest{
 		RequestID:    "r1",
@@ -305,7 +306,7 @@ func TestSessionRunner_Run_AppendErrorDoesNotFailResponse(t *testing.T) {
 	}
 	summarizer := &fakeSummarizer{}
 	mm := session.NewMemoryManager(store, summarizer, 200000)
-	sr := NewSessionRunner(inner, store, mm)
+	sr := NewSessionRunner(inner, store, mm, nil)
 
 	req := protocol.AgentRequest{
 		RequestID:    "r1",
@@ -323,5 +324,271 @@ func TestSessionRunner_Run_AppendErrorDoesNotFailResponse(t *testing.T) {
 	}
 	if res.Status != "ok" {
 		t.Fatalf("expected ok, got %s", res.Status)
+	}
+}
+
+func TestSessionRunner_Run_ReadonlyModeLimitsTools(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeSessionStore()
+	inner := &fakeInnerRunner{
+		response: protocol.AgentResponse{
+			RequestID:     "r1",
+			Status:        "ok",
+			AssistantText: "ok",
+		},
+	}
+	summarizer := &fakeSummarizer{}
+	mm := session.NewMemoryManager(store, summarizer, 200000)
+	mode := NewModeManager(audit.NopLogger{})
+
+	// Force readonly mode
+	mode.RecordLLMFailure()
+	mode.RecordLLMFailure()
+	mode.RecordLLMFailure()
+
+	sr := NewSessionRunner(inner, store, mm, mode)
+
+	req := protocol.AgentRequest{
+		RequestID:    "r1",
+		SessionID:    "s1",
+		AgentID:      "a1",
+		InputText:    "hello",
+		AllowedTools: []string{"read", "bash"},
+		TimeoutSec:   60,
+	}
+
+	sr.Run(context.Background(), req)
+
+	// In readonly mode, AllowedTools should be restricted to ["read"]
+	if len(inner.lastReq.AllowedTools) != 1 || inner.lastReq.AllowedTools[0] != "read" {
+		t.Fatalf("expected AllowedTools=[read], got %v", inner.lastReq.AllowedTools)
+	}
+}
+
+func TestSessionRunner_Run_RecordsLLMFailure(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeSessionStore()
+	inner := &fakeInnerRunner{err: errors.New("llm error")}
+	summarizer := &fakeSummarizer{}
+	mm := session.NewMemoryManager(store, summarizer, 200000)
+	mode := NewModeManager(audit.NopLogger{})
+
+	sr := NewSessionRunner(inner, store, mm, mode)
+
+	req := protocol.AgentRequest{
+		RequestID:    "r1",
+		SessionID:    "s1",
+		AgentID:      "a1",
+		InputText:    "hello",
+		AllowedTools: []string{"read", "bash"},
+		TimeoutSec:   60,
+	}
+
+	// 3 failures should trigger readonly
+	sr.Run(context.Background(), req)
+	sr.Run(context.Background(), req)
+	sr.Run(context.Background(), req)
+
+	if mode.CurrentMode() != ModeReadonly {
+		t.Fatalf("expected readonly mode after 3 failures, got %v", mode.CurrentMode())
+	}
+}
+
+func TestSessionRunner_ToolFailureLimit_AllowsUpTo10(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeSessionStore()
+	// Inner runner returns 10 failed tool calls in a single response
+	inner := &fakeInnerRunner{
+		response: protocol.AgentResponse{
+			RequestID:     "r1",
+			Status:        "ok",
+			AssistantText: "done",
+			ToolCalls: []protocol.AgentToolCall{
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+			},
+		},
+	}
+	summarizer := &fakeSummarizer{result: "summary"}
+	mm := session.NewMemoryManager(store, summarizer, 200000)
+	sr := NewSessionRunner(inner, store, mm, nil)
+
+	req := protocol.AgentRequest{
+		RequestID:    "r1",
+		SessionID:    "s1",
+		AgentID:      "a1",
+		InputText:    "hello",
+		AllowedTools: []string{"read", "bash"},
+		TimeoutSec:   60,
+	}
+
+	// First request: 10 failures accumulated. Should succeed.
+	_, err := sr.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error with 10 failures, got: %v", err)
+	}
+
+	// Second request: cumulative count is 10, which is NOT > 10, so should still succeed
+	inner.response.ToolCalls = nil // no new failures
+	_, err = sr.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error at exactly 10 cumulative failures, got: %v", err)
+	}
+}
+
+func TestSessionRunner_ToolFailureLimit_DeniesAfter10(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeSessionStore()
+	inner := &fakeInnerRunner{
+		response: protocol.AgentResponse{
+			RequestID:     "r1",
+			Status:        "ok",
+			AssistantText: "done",
+			ToolCalls: []protocol.AgentToolCall{
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+			},
+		},
+	}
+	summarizer := &fakeSummarizer{result: "summary"}
+	mm := session.NewMemoryManager(store, summarizer, 200000)
+	sr := NewSessionRunner(inner, store, mm, nil)
+
+	req := protocol.AgentRequest{
+		RequestID:    "r1",
+		SessionID:    "s1",
+		AgentID:      "a1",
+		InputText:    "hello",
+		AllowedTools: []string{"read", "bash"},
+		TimeoutSec:   60,
+	}
+
+	// First request: 11 failures accumulated
+	_, err := sr.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first request should succeed even with 11 tool failures: %v", err)
+	}
+
+	// Second request: cumulative count is 11 (> 10), should be rejected
+	_, err = sr.Run(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error after exceeding 10 tool failures")
+	}
+	if !strings.Contains(err.Error(), "tool failure limit exceeded") {
+		t.Fatalf("expected 'tool failure limit exceeded', got: %v", err)
+	}
+}
+
+func TestSessionRunner_ToolFailureLimit_CountsOnlyFailures(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeSessionStore()
+	inner := &fakeInnerRunner{
+		response: protocol.AgentResponse{
+			RequestID:     "r1",
+			Status:        "ok",
+			AssistantText: "done",
+			ToolCalls: []protocol.AgentToolCall{
+				{ToolName: "read", Args: map[string]any{"path": "/a"}, ResultSummary: "ok", OK: true},
+				{ToolName: "read", Args: map[string]any{"path": "/b"}, ResultSummary: "ok", OK: true},
+				{ToolName: "bash", Args: map[string]any{"command": "x"}, ResultSummary: "fail", OK: false},
+				{ToolName: "read", Args: map[string]any{"path": "/c"}, ResultSummary: "ok", OK: true},
+			},
+		},
+	}
+	summarizer := &fakeSummarizer{result: "summary"}
+	mm := session.NewMemoryManager(store, summarizer, 200000)
+	sr := NewSessionRunner(inner, store, mm, nil)
+
+	req := protocol.AgentRequest{
+		RequestID:    "r1",
+		SessionID:    "s1",
+		AgentID:      "a1",
+		InputText:    "hello",
+		AllowedTools: []string{"read", "bash"},
+		TimeoutSec:   60,
+	}
+
+	// Run 10 requests, each with 1 failure and 3 successes
+	for i := 0; i < 10; i++ {
+		_, err := sr.Run(context.Background(), req)
+		if err != nil {
+			t.Fatalf("request %d: unexpected error: %v", i+1, err)
+		}
+	}
+
+	// Cumulative failures: 10 (not > 10), next request should still work
+	inner.response.ToolCalls = []protocol.AgentToolCall{
+		{ToolName: "read", Args: map[string]any{"path": "/d"}, ResultSummary: "ok", OK: true},
+	}
+	_, err := sr.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected no error (only 10 failures from OK:false), got: %v", err)
+	}
+}
+
+func TestSessionRunner_Run_RecordsLLMSuccess(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeSessionStore()
+	failInner := &fakeInnerRunner{err: errors.New("llm error")}
+	summarizer := &fakeSummarizer{}
+	mm := session.NewMemoryManager(store, summarizer, 200000)
+	mode := NewModeManager(audit.NopLogger{})
+
+	sr := NewSessionRunner(failInner, store, mm, mode)
+
+	req := protocol.AgentRequest{
+		RequestID:    "r1",
+		SessionID:    "s1",
+		AgentID:      "a1",
+		InputText:    "hello",
+		AllowedTools: []string{"read", "bash"},
+		TimeoutSec:   60,
+	}
+
+	// 2 failures
+	sr.Run(context.Background(), req)
+	sr.Run(context.Background(), req)
+
+	// Swap to a succeeding inner runner
+	successInner := &fakeInnerRunner{
+		response: protocol.AgentResponse{
+			RequestID:     "r1",
+			Status:        "ok",
+			AssistantText: "ok",
+		},
+	}
+	sr.inner = successInner
+	sr.Run(context.Background(), req)
+
+	// Success should reset, so 2 more failures should not trigger readonly
+	sr.inner = failInner
+	sr.Run(context.Background(), req)
+	sr.Run(context.Background(), req)
+
+	if mode.CurrentMode() != ModeNormal {
+		t.Fatalf("expected normal mode after success reset, got %v", mode.CurrentMode())
 	}
 }

@@ -37,10 +37,11 @@ func (e *APIError) IsRetryable() bool {
 
 // ClientConfig holds configuration for the Anthropic API client.
 type ClientConfig struct {
-	APIKey    string
-	BaseURL   string
-	Model     string
-	MaxTokens int
+	APIKey     string
+	BaseURL    string
+	Model      string
+	MaxTokens  int
+	HTTPClient *http.Client
 }
 
 // Client implements LLMClient using net/http.
@@ -59,9 +60,13 @@ func NewClient(cfg ClientConfig) *Client {
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = 4096
 	}
+	httpClient := http.DefaultClient
+	if cfg.HTTPClient != nil {
+		httpClient = cfg.HTTPClient
+	}
 	return &Client{
 		cfg:    cfg,
-		httpDo: http.DefaultClient.Do,
+		httpDo: httpClient.Do,
 	}
 }
 
